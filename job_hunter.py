@@ -1,48 +1,41 @@
-import os, re, json, sqlite3, hashlib, html
+import os
+import re
+import html
+import sqlite3
+import hashlib
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+
 import requests
 
 DB_PATH = os.getenv("DB_PATH", "jobs.sqlite3")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-JOOBLE_API_KEY = os.getenv("JOOBLE_API_KEY", "")
-ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID", "")
-ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY", "")
 
-COUNTRIES = {
-    "Romania": {"jooble": "Romania", "adzuna": None},
-    "Albania": {"jooble": "Albania", "adzuna": None},
-    "Serbia": {"jooble": "Serbia", "adzuna": None},
-    "Bulgaria": {"jooble": "Bulgaria", "adzuna": None},
-    "Malta": {"jooble": "Malta", "adzuna": None},
-    "Croatia": {"jooble": "Croatia", "adzuna": None},
-    "Poland": {"jooble": "Poland", "adzuna": "pl"},
-    "Italy": {"jooble": "Italy", "adzuna": "it"},
-    "Germany": {"jooble": "Germany", "adzuna": "de"},
-    "Netherlands": {"jooble": "Netherlands", "adzuna": "nl"},
-    "France": {"jooble": "France", "adzuna": "fr"},
-    "United Kingdom": {"jooble": "United Kingdom", "adzuna": "gb"},
-    "United Arab Emirates": {"jooble": "United Arab Emirates", "adzuna": None},
-    "Saudi Arabia": {"jooble": "Saudi Arabia", "adzuna": None},
-    "Qatar": {"jooble": "Qatar", "adzuna": None},
-    "Oman": {"jooble": "Oman", "adzuna": None},
-    "Kuwait": {"jooble": "Kuwait", "adzuna": None},
-}
-
-KEYWORDS = [
-    "warehouse worker", "warehouse assistant", "storekeeper", "warehouse operative",
-    "material handler", "production worker", "factory worker", "packing worker",
-    "packer", "order picker", "general worker", "construction helper",
-    "farm worker", "agricultural worker", "cleaner", "kitchen helper",
-    "عامل مخزن", "عامل إنتاج", "مناول بضائع", "مساعد مخزن",
-    "lucrător depozit", "manipulant marfuri", "muncitor necalificat",
-    "radnik u skladištu", "skladištar", "radnik u proizvodnji",
-    "punues magazine", "punëtor magazine", "работник склад", "общ работник",
+# Arbeitnow publishes a public Europe-focused feed without an API key.
+SOURCES = [
+    ("Arbeitnow", "https://www.arbeitnow.com/api/job-board-api?page=1"),
+    ("Arbeitnow UK", "https://www.arbeitnow.co.uk/api/job-board-api?page=1"),
 ]
 
-# These phrases only create a "possible/explicit sponsorship" label.
-# They do NOT establish legal eligibility; human confirmation is still required.
+ROLE_TERMS = [
+    "warehouse", "storekeeper", "stock assistant", "warehouse assistant",
+    "warehouse operative", "material handler", "order picker", "picker packer",
+    "packer", "packing", "production worker", "factory worker", "general worker",
+    "cleaner", "cleaning operative", "kitchen porter", "farm worker",
+    "agricultural worker", "construction labourer", "construction laborer",
+    "manual worker", "unskilled worker", "muncitor necalificat",
+    "lucrator depozit", "manipulant marfuri", "radnik skladiste",
+    "radnik u proizvodnji", "skladistar", "punues magazine", "pastrues",
+]
+
+TARGET_COUNTRIES = [
+    "romania", "albania", "serbia", "bulgaria", "croatia", "malta", "cyprus",
+    "germany", "united kingdom", "uk", "poland", "italy", "netherlands",
+    "france", "austria", "belgium", "ireland", "spain", "portugal", "greece",
+    "slovenia", "slovakia", "hungary", "czechia", "czech republic", "lithuania",
+    "latvia", "estonia", "sweden", "finland", "denmark", "norway", "switzerland",
+]
+
 SPONSORSHIP_PATTERNS = [
     r"visa sponsorship", r"work permit sponsorship", r"visa provided",
     r"work permit provided", r"employer sponsors", r"sponsorship available",
@@ -51,6 +44,7 @@ SPONSORSHIP_PATTERNS = [
     r"permit de muncă", r"angajăm străini", r"lucrători străini",
     r"radna dozvola", r"strani radnici", r"leje pune", r"punëtorë të huaj",
 ]
+
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -62,151 +56,178 @@ def db():
     conn.commit()
     return conn
 
-def clean(v):
-    return html.unescape(str(v or "")).strip()
+
+def clean(value):
+    value = html.unescape(str(value or ""))
+    return re.sub(r"\s+", " ", value).strip()
+
 
 def fingerprint(job):
-    raw = "|".join([clean(job.get("company")).lower(), clean(job.get("title")).lower(),
-                    clean(job.get("location")).lower(), clean(job.get("url")).split("?")[0].lower()])
+    raw = "|".join([
+        clean(job.get("company")).lower(), clean(job.get("title")).lower(),
+        clean(job.get("location")).lower(), clean(job.get("url")).split("?")[0].lower()
+    ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+
 def sponsorship_label(text):
-    t = text.lower()
-    if any(re.search(p, t) for p in SPONSORSHIP_PATTERNS):
-        return "إشارة صريحة في الإعلان — يلزم تأكيد صاحب العمل"
-    return "غير مؤكد — يجب سؤال صاحب العمل عن الاستقدام من مصر"
+    lowered = text.lower()
+    if any(re.search(pattern, lowered) for pattern in SPONSORSHIP_PATTERNS):
+        return "وردت إشارة للتأشيرة/التصريح — يلزم تأكيد قبول متقدم من مصر"
+    return "غير مذكور — اسأل صاحب العمل عن الاستقدام من مصر"
 
-def jooble_search(keyword, country):
-    if not JOOBLE_API_KEY:
-        return []
-    endpoint = f"https://jooble.org/api/{JOOBLE_API_KEY}"
-    payload = {"keywords": keyword, "location": country, "page": "1"}
-    try:
-        r = requests.post(endpoint, json=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        print(f"[Jooble] {country} / {keyword}: {e}")
-        return []
-    out = []
-    for x in data.get("jobs", []):
-        out.append({
-            "title": clean(x.get("title")), "company": clean(x.get("company")),
-            "location": clean(x.get("location")) or country, "country": country,
-            "url": clean(x.get("link")), "source": "Jooble API",
-            "posted": clean(x.get("updated")), "salary": clean(x.get("salary")),
-            "snippet": clean(x.get("snippet"))
-        })
-    return out
 
-def adzuna_search(keyword, country_name, country_code):
-    if not (ADZUNA_APP_ID and ADZUNA_APP_KEY and country_code):
-        return []
-    url = f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1"
-    params = {"app_id": ADZUNA_APP_ID, "app_key": ADZUNA_APP_KEY,
-              "what": keyword, "results_per_page": 20, "content-type": "application/json"}
+def role_matches(text):
+    lowered = text.lower()
+    return any(term in lowered for term in ROLE_TERMS)
+
+
+def country_matches(location):
+    lowered = clean(location).lower()
+    return any(country in lowered for country in TARGET_COUNTRIES)
+
+
+def fetch_source(source_name, endpoint):
     try:
-        r = requests.get(url, params=params, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        print(f"[Adzuna] {country_name} / {keyword}: {e}")
+        response = requests.get(endpoint, headers={"User-Agent": "InternationalJobAlerts/1.0"}, timeout=35)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        print(f"[{source_name}] fetch failed: {exc}")
         return []
-    out = []
-    for x in data.get("results", []):
-        out.append({
-            "title": clean(x.get("title")), "company": clean((x.get("company") or {}).get("display_name")),
-            "location": clean((x.get("location") or {}).get("display_name")) or country_name,
-            "country": country_name, "url": clean(x.get("redirect_url")),
-            "source": "Adzuna API", "posted": clean(x.get("created")),
-            "salary": clean(x.get("salary_min")) + (" - " + clean(x.get("salary_max")) if x.get("salary_max") else ""),
-            "snippet": clean(x.get("description"))
+
+    items = payload.get("data", []) if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        print(f"[{source_name}] unexpected response format")
+        return []
+
+    jobs = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = clean(item.get("title"))
+        company = clean(item.get("company_name") or item.get("company"))
+        location = clean(item.get("location"))
+        description = clean(re.sub(r"<[^>]+>", " ", str(item.get("description", ""))))
+        tags = item.get("tags", [])
+        if isinstance(tags, list):
+            tags_text = " ".join(clean(tag) for tag in tags)
+        else:
+            tags_text = clean(tags)
+        searchable = " ".join([title, description, tags_text])
+        if not title or not role_matches(searchable) or not country_matches(location):
+            continue
+
+        posted = item.get("created_at") or item.get("date") or ""
+        if isinstance(posted, (int, float)):
+            posted = datetime.fromtimestamp(posted, timezone.utc).isoformat()
+        url = clean(item.get("url"))
+        if not url.startswith("https://"):
+            continue
+        jobs.append({
+            "title": title,
+            "company": company,
+            "location": location,
+            "country": location,
+            "url": url,
+            "source": source_name,
+            "posted": clean(posted),
+            "salary": clean(item.get("salary")),
+            "snippet": description[:1200],
         })
-    return out
+    return jobs
+
 
 def collect():
-    found = []
-    for country, cfg in COUNTRIES.items():
-        # Jooble supports broad country search; actual coverage/results depend on its index.
-        for kw in KEYWORDS:
-            found.extend(jooble_search(kw, cfg["jooble"]))
-        # Adzuna only for configured country codes; never imply coverage elsewhere.
-        if cfg["adzuna"]:
-            for kw in KEYWORDS[:12]:
-                found.extend(adzuna_search(kw, country, cfg["adzuna"]))
-    return found
+    all_jobs = []
+    for source_name, endpoint in SOURCES:
+        all_jobs.extend(fetch_source(source_name, endpoint))
+    return all_jobs
+
 
 def save_new(jobs):
     conn = db()
-    new = []
+    new_jobs = []
     now = datetime.now(timezone.utc).isoformat()
-    for j in jobs:
-        if not j.get("url") or not j.get("title"):
-            continue
-        fp = fingerprint(j)
-        text = " ".join([j.get("title",""), j.get("snippet",""), j.get("company","")])
-        label = sponsorship_label(text)
+    for job in jobs:
+        fp = fingerprint(job)
+        label = sponsorship_label(" ".join([job.get("title", ""), job.get("snippet", ""), job.get("company", "")]))
         try:
             conn.execute("""INSERT INTO jobs
                 (fingerprint,title,company,location,country,url,source,posted,salary,snippet,sponsorship,first_seen)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (fp,j.get("title"),j.get("company"),j.get("location"),j.get("country"),
-                 j.get("url"),j.get("source"),j.get("posted"),j.get("salary"),
-                 j.get("snippet"),label,now))
-            new.append({**j, "sponsorship": label})
+                (fp, job.get("title"), job.get("company"), job.get("location"), job.get("country"),
+                 job.get("url"), job.get("source"), job.get("posted"), job.get("salary"),
+                 job.get("snippet"), label, now))
+            new_jobs.append({**job, "sponsorship": label})
         except sqlite3.IntegrityError:
-            pass
+            continue
     conn.commit()
     conn.close()
-    return new
+    return new_jobs
 
-def telegram_send(text):
+
+def telegram_send(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram credentials missing; report printed instead.")
-        print(text)
+        print(message)
         return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    # Telegram limit is 4096 chars.
-    chunks = [text[i:i+3900] for i in range(0, len(text), 3900)] or ["لا توجد فرص جديدة اليوم."]
-    ok = True
+
+    endpoint = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    chunks = [message[i:i + 3900] for i in range(0, len(message), 3900)] or ["لا توجد فرص جديدة اليوم."]
+    success = True
     for chunk in chunks:
         try:
-            r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk,
-                                         "disable_web_page_preview": True}, timeout=30)
-            r.raise_for_status()
-        except Exception as e:
-            print("Telegram send failed:", e)
-            ok = False
-    return ok
+            response = requests.post(endpoint, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": chunk,
+                "disable_web_page_preview": True,
+            }, timeout=30)
+            response.raise_for_status()
+            if not response.json().get("ok"):
+                raise RuntimeError("Telegram API returned ok=false")
+        except Exception as exc:
+            print(f"Telegram send failed: {exc}")
+            success = False
+    return success
+
 
 def format_report(jobs):
     today = datetime.now().strftime("%Y-%m-%d")
     if not jobs:
-        return f"🔎 تقرير فرص العمل الدولية — {today}\nلم يتم العثور على إعلانات جديدة من المصادر المتصلة اليوم.\nهذا لا يعني عدم وجود وظائف؛ قد تكون تغطية المصادر محدودة."
+        return (
+            f"🔎 تقرير فرص العمل الدولية — {today}\n"
+            "لم تظهر إعلانات جديدة مطابقة في المصادر المتصلة اليوم.\n\n"
+            "المصدر الحالي يركز على أوروبا وبريطانيا، وقد لا يغطي الخليج أو كل دول البلقان. "
+            "عدم ظهور نتائج لا يعني عدم وجود وظائف."
+        )
+
     lines = [f"🌍 فرص عمل جديدة — {today}", f"عدد الإعلانات الجديدة: {len(jobs)}", ""]
-    for i, j in enumerate(jobs[:25], 1):
-        lines += [
-            f"{i}) {j.get('title','غير محدد')}",
-            f"الشركة: {j.get('company') or 'غير معلنة'}",
-            f"الدولة/الموقع: {j.get('country')} — {j.get('location')}",
-            f"الراتب: {j.get('salary') or 'غير معلن'}",
-            f"تاريخ الإعلان: {j.get('posted') or 'غير متاح'}",
-            f"الاستقدام من مصر: {j.get('sponsorship')}",
-            f"المصدر: {j.get('source')}",
-            f"الرابط: {j.get('url')}",
-            ""
-        ]
-    lines.append("تنبيه: ظهور الإعلان لا يثبت قبول المصريين من الخارج. أكّد تصريح العمل والتأشيرة مباشرة مع صاحب العمل قبل أي التزام.")
+    for index, job in enumerate(jobs[:20], 1):
+        lines.extend([
+            f"{index}) {job.get('title', 'غير محدد')}",
+            f"الشركة: {job.get('company') or 'غير معلنة'}",
+            f"الموقع: {job.get('location') or 'غير محدد'}",
+            f"تاريخ الإعلان: {job.get('posted') or 'غير متاح'}",
+            f"التأشيرة/الاستقدام: {job.get('sponsorship')}",
+            f"المصدر: {job.get('source')} — https://www.arbeitnow.com",
+            f"الرابط: {job.get('url')}",
+            "",
+        ])
+    lines.append("تنبيه: الإعلان لا يثبت قبول متقدم من مصر. تأكد من عقد العمل وتصريح العمل والتأشيرة مباشرةً قبل أي التزام، ولا تدفع رسوم توظيف.")
     return "\n".join(lines)
 
+
 def main():
-    if not JOOBLE_API_KEY and not (ADZUNA_APP_ID and ADZUNA_APP_KEY):
-        raise SystemExit("أضف JOOBLE_API_KEY أو بيانات Adzuna في GitHub Secrets أولاً.")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        raise SystemExit("إعدادات Telegram غير موجودة في GitHub Secrets.")
     jobs = collect()
     fresh = save_new(jobs)
     report = format_report(fresh)
-    telegram_send(report)
-    print(f"Collected={len(jobs)} New={len(fresh)}")
+    sent = telegram_send(report)
+    print(f"Collected={len(jobs)} New={len(fresh)} TelegramSent={sent}")
+
 
 if __name__ == "__main__":
     main()
+    
