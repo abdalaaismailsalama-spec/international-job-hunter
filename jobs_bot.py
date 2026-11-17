@@ -368,4 +368,4 @@ def process(con, raw):
     """Insert normalized feed rows; also accepts the legacy Adzuna tuple format."""
     now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
     new = []
-    for item in
+    for item in 
