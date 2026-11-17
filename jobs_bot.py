@@ -146,8 +146,59 @@ def db_connect():
     cols = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
     for name, typ in (("visa_evidence","TEXT DEFAULT ''"), ("send_attempts","INTEGER DEFAULT 0"),
                       ("last_send_error","TEXT DEFAULT ''")):
-        if name not in cols: con.execute(f"ALTER TABLE jobs ADD COLUMN {name} {typ}")
+        if name not in cols:
+            con.execute(f"ALTER TABLE jobs ADD COLUMN {name} {typ}")
+    con.commit()
+    if not TEST:
+        migrate_legacy_database(con)
     return con
+
+
+def migrate_legacy_database(con):
+    """Copy legacy jobs.sqlite3 records once; never alter or delete the source DB."""
+    legacy_path = "jobs.sqlite3"
+    if not os.path.exists(legacy_path) or os.path.abspath(legacy_path) == os.path.abspath(DB_PATH):
+        return
+    try:
+        old = sqlite3.connect(f"file:{os.path.abspath(legacy_path)}?mode=ro", uri=True)
+        old.row_factory = sqlite3.Row
+        names = {r[1] for r in old.execute("PRAGMA table_info(jobs)")}
+        required = {"fingerprint", "title", "company", "country", "url", "source"}
+        if not required.issubset(names):
+            old.close()
+            print("Legacy DB found but schema is not recognized; left untouched.")
+            return
+        rows = old.execute("SELECT * FROM jobs").fetchall()
+        old.close()
+        copied = 0
+        for r in rows:
+            title = str(r["title"] or "")
+            company = str(r["company"] or "غير مذكور")
+            country = str(r["country"] or "غير محدد")
+            fingerprint = str(r["fingerprint"] or "")
+            ad_id = "legacy:" + (fingerprint or hashlib.sha1((title+company+country).encode()).hexdigest())
+            nk = norm_key(company, title, country)
+            if con.execute("SELECT 1 FROM jobs WHERE ad_id=? OR norm_key=?", (ad_id, nk)).fetchone():
+                continue
+            snippet = str(r["snippet"] or "")
+            sponsorship = str(r["sponsorship"] or "")
+            cls, reasons, evidence = classify(title, sponsorship + " " + snippet)
+            con.execute("""INSERT OR IGNORE INTO jobs
+                (ad_id,url,norm_key,title,company,country,city,salary,posted,deadline,snippet,
+                 source,cls,reasons,first_seen,status,sent,visa_evidence)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (ad_id, safe_url(r["url"]), nk, title, company, country,
+                 str(r["location"] or ""), str(r["salary"] or "غير مذكور"),
+                 str(r["posted"] or ""), "", snippet, str(r["source"] or "قاعدة البيانات القديمة"),
+                 cls, "سجل قديم محفوظ؛ " + " | ".join(reasons),
+                 str(r["first_seen"] or datetime.datetime.now(datetime.timezone.utc).isoformat()),
+                 str(r["status"] or "old"), 0, evidence or sponsorship))
+            copied += con.execute("SELECT changes()").fetchone()[0]
+        con.commit()
+        print(f"Legacy database migration: {copied}/{len(rows)} records copied; source preserved.")
+    except Exception as e:
+        con.rollback()
+        print(f"Legacy database migration skipped safely: {type(e).__name__}: {e}")
 
 def norm_key(company, title, country):
     s = re.sub(r"[^a-z0-9\u0600-\u06ff]+", "", f"{company}|{title}|{country}".lower())
@@ -316,49 +367,4 @@ def process(con, raw):
         if not JOB_WORDS.search(title): continue
         company=j["company"]; country=j["country"]
         nk=norm_key(company,title,country)
-        ad_id=f'{j["source"].lower().replace(" ","_")}:{j["source_id"]}'
-        if con.execute("SELECT 1 FROM jobs WHERE ad_id=? OR norm_key=?",(ad_id,nk)).fetchone(): continue
-        cls,reasons,evidence=classify(title,j["desc"])
-        row={"ad_id":ad_id,"url":j["url"],"norm_key":nk,"title":title,"company":company,"country":country,
-             "city":j["city"],"salary":j["salary"],"posted":j["posted"],"deadline":j["deadline"],
-             "snippet":j["desc"][:500],"source":j["source"],"cls":cls,"reasons":" | ".join(reasons),
-             "visa_evidence":evidence,"first_seen":now,"status":"excluded" if cls=="excluded" else "new","sent":0}
-        con.execute(f"INSERT OR IGNORE INTO jobs({','.join(row)}) VALUES({','.join('?'*len(row))})",list(row.values()))
-        if con.execute("SELECT changes()").fetchone()[0]: new.append(row)
-    con.commit()
-    return new
-
-def telegram(message):
-    if TEST:
-        print("-----\n"+message); return True
-    tok,chat=os.environ.get("TELEGRAM_BOT_TOKEN"),os.environ.get("TELEGRAM_CHAT_ID")
-    if not(tok and chat): print("Telegram secrets missing"); return False
-    try:
-        r=requests.post(f"https://api.telegram.org/bot{tok}/sendMessage",
-            data={"chat_id":chat,"text":message[:4000],"disable_web_page_preview":"true"},timeout=30)
-        r.raise_for_status()
-        return bool(r.json().get("ok"))
-    except Exception as e:
-        print(f"Telegram error: {type(e).__name__}: {e}")
-        return False
-
-def card(r):
-    head={"confirmed":"🟢 استقدام مؤكد بدليل من نص الإعلان","possible":"🟡 فرصة مناسبة تحتاج سؤال صاحب العمل","excluded":"⚪ مستبعد"}[r["cls"]]
-    return (f"{head}\n\nالوظيفة: {r['title']}\nالشركة: {r['company']}\nالدولة/المدينة: {r['country']} - {r['city']}\n"
-            f"الراتب: {r['salary']}\nتاريخ النشر: {r['posted'] or 'غير مذكور'}\n"
-            f"دليل التأشيرة: {r['reasons']}\nالنص الدال: {r['visa_evidence'] or 'لم يذكر الإعلان دعم التأشيرة'}\n"
-            f"المصدر: {r['source']}\nرابط الإعلان: {r['url']}\n"
-            "ملاحظة: قبول التقديم من مصر غير مضمون ما لم يذكره الإعلان؛ اسأل صاحب العمل قبل إرسال مستندات. لا تدفع رسومًا.")
-
-def build_dashboard(con, source_stats=None):
-    path="data/test_dashboard.html" if TEST else "docs/index.html"
-    con.row_factory=sqlite3.Row
-    rows=[dict(x) for x in con.execute("SELECT * FROM jobs ORDER BY first_seen DESC")]
-    con.row_factory=None
-    data=json.dumps(rows,ensure_ascii=False).replace("</","<\\\\/")
-    safe=json.dumps(source_stats or {},ensure_ascii=False)
-    template=DASH.replace("__DATA__",data).replace("__SOURCES__",safe)
-    os.makedirs(os.path.dirname(path),exist_ok=True)
-    with open(path,"w",encoding="utf-8") as f:f.write(template)
-
-DASH="""<!doctype html><html 
+        ad_id=f'{j["source"].lower().replace(" 
