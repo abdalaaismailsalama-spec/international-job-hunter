@@ -12,10 +12,16 @@ HEADERS = {"User-Agent": "InternationalJobHunter/2.0"}
 
 ADZUNA_COUNTRIES = {"it": "إيطاليا", "pl": "بولندا"}
 TARGET_COUNTRIES = {"AE": "الإمارات", "SA": "السعودية", "IT": "إيطاليا", "PL": "بولندا", "RS": "صربيا", "AL": "ألبانيا", "GR": "اليونان"}
+COUNTRY_ALIASES = {"united arab emirates": "AE", "uae": "AE", "saudi arabia": "SA", "italy": "IT", "poland": "PL", "serbia": "RS", "albania": "AL", "greece": "GR"}
 QUERIES = ["warehouse worker", "production worker", "packer", "general worker", "cleaner"]
 
 JOB_WORDS = re.compile(r"warehouse|magazzin|magazyn|production|produkc|factory|packer|cleaner|عامل|مخزن|إنتاج|تغليف|تنظيف", re.I)
 SPONSOR = re.compile(r"visa sponsor|sponsorship|work permit|relocation|housing provided|accommodation", re.I)
+
+def parse_country(raw):
+    s = str(raw or "").strip()
+    if len(s) == 2 and s.upper() in TARGET_COUNTRIES: return s.upper()
+    return COUNTRY_ALIASES.get(s.lower(), "")
 
 def clean_html(s):
     s = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", str(s or " "))
@@ -85,49 +91,5 @@ def process(con, raw):
         nk = norm_key(company, title, country)
         ad_id = f"adzuna:{item.get('source_id') or nk}"
         if con.execute("SELECT 1 FROM jobs WHERE ad_id=? OR norm_key=?", (ad_id, nk)).fetchone(): continue
-        desc = clean_html(item.get("desc") or "")
-        cls, reasons, evidence = classify(title, desc)
-        row = {
-            "ad_id": ad_id, "url": safe_url(item.get("url")), "norm_key": nk,
-            "title": title, "company": company, "country": country,
-            "city": str(item.get("city") or ""), "salary": "غير مذكور",
-            "posted": str(item.get("posted") or ""), "deadline": "غير مذكور",
-            "snippet": desc[:500], "source": str(item.get("source") or "Adzuna"),
-            "cls": cls, "reasons": " | ".join(reasons), "visa_evidence": evidence,
-            "first_seen": now, "status": "excluded" if cls == "excluded" else "pending", "sent": 0,
-        }
-        cols = list(row)
-        con.execute(f"INSERT OR IGNORE INTO jobs({','.join(cols)}) VALUES({','.join('?' for _ in cols)})", [row[k] for k in cols])
-        if con.execute("SELECT changes()").fetchone()[0]: new.append(row)
-    con.commit()
-    return new
-
-def telegram(message):
-    if TEST: print(message); return True
-    tok, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
-    if not (tok and chat): return False
-    try:
-        r = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage", data={"chat_id": chat, "text": message[:4000], "disable_web_page_preview": "true"}, timeout=30)
-        return r.ok
-    except Exception: return False
-
-def card(r):
-    return f"🟢 فرصة عمل\n\nالوظيفة: {r['title']}\nالشركة: {r['company']}\nالدولة: {r['country']}\nرابط: {r['url']}"
-
-def main():
-    con = db_connect()
-    errors = []
-    raw = fetch_adzuna(errors)
-    new_rows = process(con, raw)
-    rows = con.execute("SELECT * FROM jobs WHERE COALESCE(sent,0)=0 AND cls IN ('confirmed','possible') LIMIT 15").fetchall()
-    for r in rows:
-        # r mapping: 0:id, 1:ad_id, 2:url, 3:norm_key, 4:title, 5:company, 6:country, 7:city, 8:salary, 9:posted, 10:deadline, 11:snippet, 12:source, 13:cls, 14:reasons, 15:first_seen, 16:status, 17:sent, 18:visa_evidence
-        d = {"title": r[4], "company": r[5], "country": r[6], "url": r[2]}
-        if telegram(card(d)) and not TEST:
-            con.execute("UPDATE jobs SET sent=1, status='sent' WHERE ad_id=?", (r[1],))
-    con.commit()
-    con.close()
-
-if __name__ == "__main__":
-    main()
-    
+        desc = clean_html(item.
+        
