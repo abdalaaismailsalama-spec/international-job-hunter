@@ -56,7 +56,7 @@ LANG = re.compile(r"fließend(e|es)? deutsch|deutsch (auf )?(muttersprach|c1|c2)
                   r"vloeiend nederlands|moedertaal nederlands|fran[cç]ais courant|"
                   r"langue maternelle fran|biegła znajomość|madrelingua italian", re.I)
 NEG = re.compile(
-    r"\bno\W+(visa\W+|work permit\W+)?sponsor|\bno\W+(visa|work permit)\b|"
+    r"\bno\W+(visa\W+|work permit\W+)?sponsor(?!ship required)|\bno\W+(visa|work permit)\b|"
     r"without (a )?(visa|sponsorship)|(?:do|does|did) not (offer|provide|sponsor|arrange)|"
     r"(don't|doesn't|cannot|can't|unable to) (offer|provide|sponsor|arrange)|"
     r"not (able|in a position) to (offer|provide|sponsor)|"
@@ -359,12 +359,13 @@ def collect(errors):
             errors.append(f"{name}: {type(e).__name__}")
     return out
 
+def safe_job_url(raw):
+    """Backward-compatible name used by the project tests."""
+    return safe_url(raw)
+
+
 def process(con, raw):
-    now=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
-    new=[]
-    for j in raw:
-        title=j["title"]
-        if not JOB_WORDS.search(title): continue
-        company=j["company"]; country=j["country"]
-        nk=norm_key(company,title,country)
-        ad_id=f'{j["source"].lower().replace(" 
+    """Insert normalized feed rows; also accepts the legacy Adzuna tuple format."""
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    new = []
+    for item in
