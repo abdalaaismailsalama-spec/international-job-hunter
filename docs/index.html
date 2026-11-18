@@ -1,0 +1,24 @@
+<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>لوحة الوظائف</title>
+<style>body{font-family:system-ui,Tahoma,sans-serif;margin:0;padding:12px;background:#f6f7f9;color:#222}
+.st{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.b{background:#fff;border-radius:10px;padding:10px;text-align:center}
+.b b{display:block;font-size:22px}input,select{width:100%;padding:8px;margin:4px 0;border:1px solid #ccc;border-radius:8px}
+.j{background:#fff;border-radius:10px;padding:10px;margin:8px 0}.t{font-weight:700}.m{font-size:13px;color:#555}
+.c{display:inline-block;padding:1px 8px;border-radius:8px;font-size:12px}.confirmed{background:#cdf0d4}.possible{background:#fbefb5}.excluded{background:#eee}
+a{color:#0a58ca}</style></head><body><h2>لوحة الوظائف</h2><div class="st" id="st"></div>
+<h3>أسباب الاستبعاد</h3><div id="rs" class="m"></div><h3>السجل</h3>
+<input id="q" placeholder="بحث بالمهنة أو الشركة"><select id="co"><option value="">كل الدول</option></select>
+<select id="cl"><option value="">كل التصنيفات</option><option value="confirmed">مؤكد</option><option value="possible">محتمل</option><option value="excluded">مستبعد</option></select>
+<div id="l"></div><script>const D=[];const $=i=>document.getElementById(i);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const safe=u=>(u.startsWith('http://')||u.startsWith('https://'))?esc(u):'';
+const n=c=>D.filter(x=>x.cls==c).length;
+$('st').innerHTML=[['وجدنا',D.length],['مؤكد',n('confirmed')],['يحتاج تأكيد',n('possible')],['مستبعد',n('excluded')]].map(a=>`<div class=b><b>${a[1]}</b>${a[0]}</div>`).join('');
+const R={};D.filter(x=>x.cls=='excluded').forEach(x=>{const k=(x.reasons||'').replace(/«.*?»/g,'').trim();R[k]=(R[k]||0)+1});
+$('rs').innerHTML=Object.entries(R).map(e=>`${esc(e[0])}: ${e[1]}`).join('<br>')||'لا يوجد';
+[...new Set(D.map(x=>x.country))].forEach(c=>$('co').add(new Option(c,c)));
+const lab={confirmed:'مؤكد',possible:'محتمل',excluded:'مستبعد'};
+function r(){const q=$('q').value.toLowerCase(),co=$('co').value,cl=$('cl').value;
+$('l').innerHTML=D.filter(x=>(!co||x.country==co)&&(!cl||x.cls==cl)&&(!q||((x.title||'')+(x.company||'')).toLowerCase().includes(q))).slice(0,300).map(x=>
+`<div class=j><span class="c ${x.cls}">${lab[x.cls]}</span><div class=t>${esc(x.title)}</div><div class=m>${esc(x.company)} · ${esc(x.country)} ${esc(x.city)} · ${esc(x.posted)}<br>الراتب: ${esc(x.salary)}<br>${esc(x.reasons)}<br>${esc(x.visa_evidence||'')}</div>${safe(x.url||'')?`<a href="${safe(x.url||'')}" target=_blank rel=noopener>الإعلان</a>`:''}</div>`).join('')}
+['q','co','cl'].forEach(i=>$(i).addEventListener('input',r));r();</script></body></html>
