@@ -34,6 +34,27 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(bot.safe_job_url("https://example.com/job#fragment"), "https://example.com/job")
 
 
+class FeedTests(unittest.TestCase):
+    def test_yubhub_nested_response_and_source_url(self):
+        response = {"data": {"count": 1, "jobs": [{"id": "one", "title": "Warehouse worker", "company": "Example", "country_code": "IT", "location": "Rome", "source_url": "https://example.com/job", "salary_range": "EUR 2000"}]}}
+        errors = []
+        with patch.object(bot, "ALL_QUERIES", ["warehouse"]), patch.object(bot, "request_json", return_value=response), patch.object(bot.time, "sleep"):
+            jobs = bot.fetch_yubhub(errors)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["url"], "https://example.com/job")
+        self.assertEqual(jobs[0]["country_code"], "IT")
+        self.assertEqual(jobs[0]["salary"], "EUR 2000")
+
+    def test_yubhub_unknown_country_stays_unknown(self):
+        response = {"data": {"jobs": [{"title": "Warehouse worker", "location": "Upper Marlboro, MD", "source_url": "https://example.com/job"}]}}
+        errors = []
+        with patch.object(bot, "ALL_QUERIES", ["warehouse"]), patch.object(bot, "request_json", return_value=response), patch.object(bot.time, "sleep"):
+            jobs = bot.fetch_yubhub(errors)
+        self.assertEqual(errors, [])
+        self.assertNotIn(jobs[0]["country_code"], bot.TARGET_COUNTRIES)
+
+
 class PersistenceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
