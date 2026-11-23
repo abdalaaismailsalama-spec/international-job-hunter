@@ -259,13 +259,16 @@ def fetch_yubhub(errors):
     for q in ALL_QUERIES:
         try:
             data=request_json("https://api.yubhub.co/search", {"q":q,"perPage":50,"page":1})
-            rows=data.get("jobs", data.get("data", [])) if isinstance(data,dict) else data
+            payload = data.get("data", data) if isinstance(data, dict) else data
+            rows = payload.get("jobs", []) if isinstance(payload, dict) else payload
             for j in rows or []:
+                if not isinstance(j, dict):
+                    continue
                 loc=j.get("location") or {}
-                country=j.get("country") or (loc.get("country") if isinstance(loc,dict) else "")
+                country=j.get("country_code") or j.get("country") or (loc.get("country") if isinstance(loc,dict) else "")
                 out.append(normalized("YubHub", j.get("id"), j.get("title"), j.get("company") or j.get("company_name"),
-                    country, loc.get("city") if isinstance(loc,dict) else loc, j.get("apply_url") or j.get("url"),
-                    j.get("description"), j.get("date_posted") or j.get("first_seen"), j.get("salary_text") or j.get("salary")))
+                    country, loc.get("city") if isinstance(loc,dict) else loc, j.get("apply_url") or j.get("url") or j.get("source_url"),
+                    j.get("description"), j.get("date_posted") or j.get("first_seen"), j.get("salary_text") or j.get("salary") or j.get("salary_range")))
             time.sleep(.25)
         except Exception as e: errors.append(f"YubHub/{q}: {type(e).__name__}")
     return out
